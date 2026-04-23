@@ -1,7 +1,6 @@
 import redis
 import time
 import os
-import signal
 
 r = redis.Redis(
     host=os.getenv("REDIS_HOST", "redis"),
