@@ -1,0 +1,168 @@
+name: Full CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y hadolint
+          pip install flake8
+          npm install -g eslint
+
+      - name: Lint Python
+        run: flake8 .
+
+      - name: Lint JavaScript
+        run: eslint . || true 
+
+      - name: Lint Dockerfiles
+        run: hadolint $(find . -name Dockerfile)
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python deps
+        run: |
+          pip install -r api/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=api --cov-report=xml
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build images
+        run: |
+          docker build -t localhost:5000/api:${{ github.sha }} ./api
+          docker build -t localhost:5000/frontend:${{ github.sha }} ./frontend
+          docker build -t localhost:5000/worker:${{ github.sha }} ./worker
+
+          docker tag localhost:5000/api:${{ github.sha }} localhost:5000/api:latest
+          docker tag localhost:5000/frontend:${{ github.sha }} localhost:5000/frontend:latest
+          docker tag localhost:5000/worker:${{ github.sha }} localhost:5000/worker:latest
+
+      - name: Push images
+        run: |
+          docker push localhost:5000/api:${{ github.sha }}
+          docker push localhost:5000/frontend:${{ github.sha }}
+          docker push localhost:5000/worker:${{ github.sha }}
+
+  security:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget
+          wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.50.0_Linux-64bit.deb
+          sudo dpkg -i trivy_0.50.0_Linux-64bit.deb
+
+      - name: Scan images
+        run: |
+          trivy image --severity CRITICAL --exit-code 1 --format sarif -o api.sarif localhost:5000/api:${{ github.sha }}
+          trivy image --severity CRITICAL --exit-code 1 --format sarif -o frontend.sarif localhost:5000/frontend:${{ github.sha }}
+          trivy image --severity CRITICAL --exit-code 1 --format sarif -o worker.sarif localhost:5000/worker:${{ github.sha }}
+
+      - name: Upload SARIF
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: "*.sarif"
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: security
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stack
+        run: docker compose up -d
+
+      - name: Wait for API
+        run: |
+          timeout 120 bash -c 'until docker-compose ps | grep -q "healthy"; do sleep 5; done'
+
+      - name: Submit job
+        run: |
+          JOB_ID=$(curl -s -X POST http://localhost:8000/jobs | jq -r .job_id)
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+
+      - name: Poll job
+        run: |
+          for i in {1..30}; do
+            STATUS=$(curl -s http://localhost:8000/jobs/$JOB_ID | jq -r .status)
+            if [ "$STATUS" = "completed" ]; then
+              echo "Job completed"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Job did not complete"
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker compose down
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: integration
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Pull new image
+        run: |
+          docker pull localhost:5000/api:${{ github.sha }}
+
+      - name: Start new container
+        run: |
+          docker run -d --name api_new -p 8001:8000 localhost:5000/api:${{ github.sha }}
+
+      - name: Wait for health
+        run: |
+          for i in {1..30}; do
+            curl -f http://localhost:8001/health && exit 0
+            sleep 2
+          done
+          echo "New container failed health check"
+          docker rm -f api_new
+          exit 1
+
+      - name: Stop old container and switch
+        run: |
+          docker stop api_old || true
+          docker rename api_new api_old
