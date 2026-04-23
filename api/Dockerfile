@@ -2,7 +2,7 @@
 FROM python:3.11-alpine as builder
 WORKDIR /app
 COPY requirements.txt .
-RUN apk add --no-cache curl
+
 RUN pip install --user --no-cache-dir -r requirements.txt
 
 # Production stage
@@ -10,7 +10,7 @@ FROM python:3.11-alpine
 
 # Set working directory and create non-root user
 WORKDIR /app
-RUN apk add --no-cache curl
+
 RUN addgroup -S hng && adduser -S hngdevops -G hng
 
 # Copy built assets and production dependencies
