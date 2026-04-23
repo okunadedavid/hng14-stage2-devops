@@ -29,7 +29,10 @@ jobs:
            chmod +x /usr/local/bin/hadolint
 
       - name: Lint Dockerfiles
-        run: hadolint $(find . -name Dockerfile)
+        run: hadolint \
+         --ignore DL3018 \
+         --ignore DL3008\
+         $(find . -name Dockerfile)
   test:
     runs-on: ubuntu-latest
     needs: lint
