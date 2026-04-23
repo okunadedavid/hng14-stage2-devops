@@ -40,7 +40,7 @@ jobs:
       - name: Install Python deps
         run: |
           pip install -r api/requirements.txt
-          pip install  pytest pytest-cov
+          pip install  pytest pytest-cov fastapi httpx
 
       - name: Run tests with coverage
         run: |
